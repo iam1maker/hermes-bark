@@ -15,7 +15,7 @@ Plugin id: `hermes-bark` · kind: `platform` · requires Hermes `>=0.23.0`
 | `hermes send --to bark[:device]` | shell / scripts / agent CLI |
 | `bark_notify` tool | the agent pushes a link, image URL or delivery notice mid-turn |
 | hooks `on_session_end` / `subagent_stop` | optional, off by default — failure/interruption alerts only |
-| Desktop page (`Bark 通知` / `Bark notifications`) | channel status, device map, notification rules, test push, delivery log |
+| Desktop page (`Bark notifications`) | channel status, device map, notification rules, test push, delivery log |
 
 Multi-device aliases, Bark fields `level / sound / group / ttl / url / image /
 icon / autoCopy / isArchive / id`, retry with never-left-the-process-only
@@ -30,7 +30,8 @@ cp -R . ~/.hermes/profiles/<profile>/plugins/hermes-bark
 hermes plugins enable hermes-bark
 ```
 
-Set the device key (Dashboard → Secret, or `.env`):
+Set the device key through Hermes — Dashboard → Secret on the plugin page, or
+`hermes config set`:
 
 ```dotenv
 BARK_TOKEN=<device key from the Bark app>     # alias "default"
@@ -39,10 +40,13 @@ BARK_SERVER=https://api.day.app                # optional, self-hosted is fine
 BARK_HOME_CHANNEL=default                      # cron / `--to bark` target
 ```
 
-Device keys are read through Hermes' profile-scoped secret store; `config.yaml`
-never holds one. Non-secret defaults (`server`, `level`, `group`, `ttl`,
-notification rules, …) live in `plugins.entries.hermes-bark.settings` and are
-editable both in the native Settings form and on the plugin page.
+Device keys are **routed by Hermes**, never read from disk by this plugin: a read
+goes through `gateway.platforms._shared.get_scoped_secret`, i.e. the profile's
+secret scope (with a process-env fallback in CLI contexts). That is also why a
+key saved on the page is usable immediately. `config.yaml` never holds a key;
+non-secret defaults (`server`, `level`, `group`, `ttl`, notification rules, …)
+live in `plugins.entries.hermes-bark.settings` and are editable both in the
+native Settings form and on the plugin page.
 
 **Desktop half.** This package ships `desktop/plugin.js`. A package-managed
 desktop half is opt-in: after install, enable the *Desktop* switch for the
@@ -76,18 +80,25 @@ and at `hermes://open/bark`.
   self-host, that server sees them.
 - No telemetry, no analytics, no self-updater, no outbound calls anywhere else.
 - Secrets are read via Hermes (`gateway.platforms._shared.get_scoped_secret` →
-  `agent.secret_scope`), so a routed profile never borrows another profile's key.
+  `agent.secret_scope`); the plugin never parses `.env` itself, and a routed
+  profile never borrows another profile's key.
 - Delivery records (last 400 attempts, 250 kept) are written locally to
   `<hermes home>/plugin-data/hermes-bark/deliveries.jsonl`.
 - The desktop page calls only the plugin's own routes under
   `/api/plugins/hermes-bark/`.
+- UI copy: English is the source language; the Chinese bundle is a data file
+  (`dashboard/locales/zh.json`) the backend ships to the page, so the same
+  strings serve the API messages and the rendered page. Contribution labels
+  (sidebar, palette) are English — the host registers them before the first
+  snapshot arrives.
 
 ## Development
 
 ```bash
 python tests/test_bark.py             # 36 client/settings/notify tests, no network
-python tests/test_dashboard_api.py    # 13 router tests against a fake bark-server
+python tests/test_dashboard_api.py    # 14 router tests against a fake bark-server
 node  tests/render_page.mjs --locale=en   # renders plugin.js headless, asserts no CJK leak
+node  tests/render_page.mjs --locale=zh   # same page with the Chinese bundle
 HERMES_SRC=~/path/to/hermes-agent python tests/e2e_adapter_contract.py
 python scripts/serve-local.py --port 18123   # same router, own process, no gateway restart
 ```

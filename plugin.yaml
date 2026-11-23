@@ -28,9 +28,9 @@ provides_hooks:
   - subagent_stop
 
 # Manifest env metadata drives `hermes config` / the dashboard card only.
-# Runtime reads go through settings.secret(): scoped secret → process env →
-# .env files (profile home, $HERMES_HOME, ~/.hermes), which is what makes a key
-# saved in the Dashboard visible to a routed profile.
+# Runtime reads go through settings.secret(), i.e. Hermes' credential routing
+# (profile secret scope, process env for CLI): the plugin never parses .env
+# itself, and a key saved from the dashboard is published into the scope.
 requires_env:
   - name: BARK_TOKEN
     description: "Default Bark device key (found in the Bark app)"
@@ -53,92 +53,92 @@ optional_env:
 
 # Rendered natively under Settings → Plugins and written by plugins.manage into
 # plugins.entries.hermes-bark.settings (atomic, schema-validated). Devices and
-# keys are NOT here on purpose: a key is a secret and belongs in .env
-# (BARK_KEY_<ALIAS>), never in config.yaml.
+# keys are NOT here on purpose: a key is a secret and belongs in Hermes'
+# credential store (BARK_KEY_<ALIAS>), never in config.yaml.
 config_schema:
   server:
     type: str
     default: "https://api.day.app"
-    label: Bark 服务器
-    description: "默认 https://api.day.app；自建服务器填自己的地址（明文 http 只建议局域网）"
+    label: Bark server
+    description: "Defaults to https://api.day.app; point it at your own server if self-hosted (plain HTTP is for a LAN you control)."
   proxy:
     type: str
     default: ""
-    label: 代理
-    description: "留空 = 跟随 HTTPS_PROXY 环境变量；direct = 强制直连；也可填 http://127.0.0.1:7897"
+    label: Proxy
+    description: "Empty = follow HTTPS_PROXY; direct = ignore the environment; or an explicit proxy URL such as http://127.0.0.1:7897"
   title:
     type: str
     default: "Hermes"
-    label: 默认标题
-    description: "推送卡片顶部标题；cron / 通知都继承它"
+    label: Default title
+    description: "Title at the top of the notification card; cron and hook pushes inherit it."
   default_device:
     type: str
     default: ""
-    label: 默认设备
-    description: "目标留空时投递到哪个别名；留空 = default（BARK_TOKEN）或第一台已配置设备"
+    label: Default device
+    description: "Alias used when a target is empty; empty = default (BARK_TOKEN) or the first configured device."
   level:
     type: str
     choices: [active, timeSensitive, critical, passive]
     default: timeSensitive
-    label: 中断级别
-    description: "timeSensitive 可穿透专注模式；critical 需 App 内授权；passive 静默进通知中心"
+    label: Interruption level
+    description: "timeSensitive breaks through Focus; critical needs in-app permission; passive lands quietly in Notification Center."
   group:
     type: str
     default: "Hermes"
-    label: 通知分组
-    description: "同一分组的推送在通知中心折叠在一起"
+    label: Notification group
+    description: "Pushes in one group are stacked together in Notification Center."
   sound:
     type: str
     default: ""
-    label: 提示音
-    description: "Bark 内置铃声名（如 bell、alarm）或留空用系统默认"
+    label: Sound
+    description: "A Bark ringtone name (e.g. bell, alarm), or empty for the system default."
   icon:
     type: str
     default: ""
-    label: 图标 URL
-    description: "覆盖通知图标（http(s) 图片地址）"
+    label: Icon URL
+    description: "Overrides the notification icon (http(s) image URL)."
   ttl:
     type: int
     default: 0
-    label: 有效期（秒）
-    description: "超过有效期不再投递；0 = 不限制"
+    label: TTL (seconds)
+    description: "Stop delivering after this many seconds; 0 = no limit."
   notify_turn_end:
     type: bool
     default: false
-    label: 回合结束推送
-    description: "一轮对话结束时推送（默认只推失败/中断，避免每次聊天都响）"
+    label: Push when a turn ends
+    description: "Push when a turn finishes (default: failures and interruptions only, so a normal chat stays quiet)."
   notify_turn_end_min_duration_s:
     type: float
     default: 90
-    label: 回合最短时长（秒）
-    description: "短于该时长的成功回合不推送；失败/中断不受限"
+    label: Minimum turn duration (s)
+    description: "Successful turns shorter than this are not pushed; failures and interruptions always are."
   notify_turn_end_statuses:
     type: str
     default: "failed,interrupted"
-    label: 回合推送状态
-    description: "逗号分隔：completed / failed / interrupted"
+    label: Turn-end statuses
+    description: "Comma separated: completed / failed / interrupted"
   notify_subagent_stop:
     type: bool
     default: false
-    label: 子代理结束推送
-    description: "delegate_task 的子代理收工后推送摘要"
+    label: Push when a subagent stops
+    description: "Push a summary after each delegate_task subagent finishes."
   notify_subagent_stop_min_duration_ms:
     type: float
     default: 30000
-    label: 子代理最短时长（毫秒）
-    description: "短任务不推送，避免并行子代理刷屏"
+    label: Minimum subagent duration (ms)
+    description: "Short tasks are skipped so parallel subagents cannot flood the phone."
   notify_quiet_hours:
     type: str
     default: ""
-    label: 静默时段
-    description: "如 23:30-08:00（可逗号分隔多段）；此时段内所有自动推送跳过"
+    label: Quiet hours
+    description: "e.g. 23:30-08:00 (comma separated for several windows); every automatic push is skipped inside them."
   dedupe:
     type: bool
     default: true
-    label: 5 秒去重
-    description: "同一会话 5 秒内重复内容只推一次（Bark id 字段）"
+    label: 5-second dedupe
+    description: "Identical content within 5 seconds of the same session is pushed once (Bark id field)."
   allow_private_image_urls:
     type: bool
     default: false
-    label: 允许私网图片 URL
-    description: "Bark 服务端要能取到图片；开启前确认服务器在可达网络内"
+    label: Allow private-network image URLs
+    description: "The Bark server has to fetch the image itself; only enable this where the server can reach that network."

@@ -42,6 +42,16 @@ def main() -> int:
     from fastapi import FastAPI
     import uvicorn
 
+    # Standalone process: run Hermes' own dotenv loader so credentials resolve the
+    # same way the CLI does. The plugin itself never reads .env (catalog rule 11).
+    if HERMES_REPO.name:
+        try:
+            from hermes_cli.env_loader import load_hermes_dotenv
+
+            load_hermes_dotenv()
+        except Exception as exc:  # noqa: BLE001 — a broken loader must not stop the server
+            print(f"dotenv load skipped: {exc}", file=sys.stderr)
+
     spec = importlib.util.spec_from_file_location("bark_dashboard_api", ROOT / "dashboard" / "plugin_api.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

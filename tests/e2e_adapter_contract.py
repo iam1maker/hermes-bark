@@ -78,7 +78,7 @@ def main() -> int:
 
     async def drive():
         connected = await adapter.connect()
-        r1 = await adapter.send("test", "adapter contract 适配器")
+        r1 = await adapter.send("test", "adapter contract ✓")
         r2 = await adapter.send_image("test", "https://example.com/pic.png")
         r3 = await adapter.send_image("test", "/tmp/does-not-exist.png")
         await adapter.disconnect()

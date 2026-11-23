@@ -1,7 +1,7 @@
 {
   "name": "hermes-bark",
-  "label": "Bark 通知",
-  "description": "Bark iOS 推送通道：服务器探测、设备映射、行为规则、试推与投递记录",
+  "label": "Bark notifications",
+  "description": "Bark iOS push channel: server probe, device mapping, notify rules, test push and delivery log",
   "icon": "Bell",
   "version": "0.2.0",
   "api": "plugin_api.py"

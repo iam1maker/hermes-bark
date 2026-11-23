@@ -44,7 +44,7 @@ platforms:
 YAML
 
 echo "=== 1. hermes send --to bark:test ==="
-OUT=$(HERMES_HOME="$TMP" hermes send --to bark:test "e2e hello 中文 & symbols" --json 2>&1)
+OUT=$(HERMES_HOME="$TMP" hermes send --to bark:test "e2e hello ✓ & symbols" --json 2>&1)
 RC=$?
 echo "$OUT"
 echo "rc=$RC"
@@ -68,7 +68,7 @@ for i, row in enumerate(rows, 1):
           f"group={p.get('group')} body={p.get('body')!r}")
     ok = ok and p.get("device_key") == "AbCdEfGhIjKlMnOpQrStUv"
 ok = ok and rc1 == 0 and rc2 == 0
-ok = ok and rows[0]["payload"].get("body") == "e2e hello 中文 & symbols"
+ok = ok and rows[0]["payload"].get("body") == "e2e hello ✓ & symbols"
 print("PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
 PY

@@ -1,11 +1,16 @@
 /**
- * 渲染冒烟：不启动桌面端，直接以宿主语义（bundles 解析 = 当前语言 → en → 键）
- * 渲染 Bark 页面，抓出可视文本，用来验证「非中文 → 英文」以及版式结构。
+ * Render smoke test: no desktop app involved. Loads the real plugin.js against a
+ * minimal host stub and walks the page tree, so "any non-Chinese locale renders
+ * English" and the layout structure can be checked without a running shell.
  *
- * 用法：node tests/render_page.mjs [--locale=en|zh|ja] [--dump]
+ * The host stub serves /status with the same ``strings`` bundle the real backend
+ * ships (dashboard/locales/zh.json), which is how the page localizes itself.
+ *
+ * Usage: node tests/render_page.mjs [--locale=en|zh|ja] [--dump]
  */
 
 import { pathToFileURL } from 'node:url'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
 const args = Object.fromEntries(
@@ -17,16 +22,18 @@ const args = Object.fromEntries(
 
 const LOCALE = args.locale || 'en'
 const PLUGIN = path.resolve(process.env.BARK_PLUGIN || path.join(import.meta.dirname, '..', 'desktop', 'plugin.js'))
+const ZH = JSON.parse(readFileSync(path.join(import.meta.dirname, '..', 'dashboard', 'locales', 'zh.json'), 'utf8'))
+const STRINGS = /^zh/i.test(LOCALE) ? ZH : {}
 
-/* ── 宿主桩 ─────────────────────────────────────────────────────────── */
+/* ── Host stub ──────────────────────────────────────────────────────── */
 
 const iso = ms => new Date(Date.now() + ms).toISOString()
-let BUNDLES = {}
 const STATE = { contributions: [], rest: [], snapshot: null }
 
 const snapshot = {
   ok: true,
-  plugin: { id: 'hermes-bark', label: 'Bark', version: '0.2.0', router_version: '1.0.0', dir: '/tmp/x', config_path: '/tmp/x/config.yaml', env_files: ['/tmp/x/.env'], config_exists: true },
+  strings: STRINGS,
+  plugin: { id: 'hermes-bark', label: 'Bark', version: '0.2.0', router_version: '1.0.0', dir: '/tmp/x', config_path: '/tmp/x/config.yaml', secret_source: 'env', config_exists: true },
   server: { url: 'https://api.day.app', host: 'api.day.app', proxy: '', ping: { ok: true, status: 200, ms: 210, version: '2.2.5', body: 'pong' } },
   devices: [{ alias: 'default', masked: '••••voyF', is_default: true, env: 'BARK_KEY_DEFAULT', source: 'env', where: '.env', from_extra: false }],
   default_device: 'default',
@@ -65,12 +72,7 @@ const rest = async url => {
 }
 
 const sdk = {
-  host: { notify() {}, navigate() {} },
-  usePluginI18n: () => {
-    const t = key => BUNDLES[LOCALE]?.[key] ?? BUNDLES.en?.[key] ?? key
-    return t
-  },
-  __setBundles: () => {}
+  host: { notify() {}, navigate() {} }
 }
 
 const react = {
@@ -86,7 +88,7 @@ const jsxRuntime = {
   jsxs: (type, props) => ({ type, props: props || {} })
 }
 
-/* ── 模块加载（把 import 说明符指向桩） ─────────────────────────────── */
+/* ── Module loading (import specifiers point at the stubs) ──────────── */
 
 const { register } = await import('node:module')
 
@@ -98,7 +100,7 @@ export async function resolve(specifier, context, next) {
   return next(specifier, context)
 }
 export async function load(url, context, next) {
-  if (url === 'stub:sdk') return { format: 'module', shortCircuit: true, source: 'export const host = globalThis.__SDK__.host; export const usePluginI18n = globalThis.__SDK__.usePluginI18n' }
+  if (url === 'stub:sdk') return { format: 'module', shortCircuit: true, source: 'export const host = globalThis.__SDK__.host' }
   if (url === 'stub:react') return { format: 'module', shortCircuit: true, source: 'export const useEffect = globalThis.__REACT__.useEffect; export const useState = globalThis.__REACT__.useState' }
   if (url === 'stub:jsx') return { format: 'module', shortCircuit: true, source: 'export const jsx = globalThis.__JSX__.jsx; export const jsxs = globalThis.__JSX__.jsxs' }
   return next(url, context)
@@ -115,22 +117,12 @@ globalThis.__JSX__ = jsxRuntime
 
 const plugin = (await import(pathToFileURL(PLUGIN).href)).default
 
-/* ── 注册插件，拿路由渲染函数 ───────────────────────────────────────── */
+/* ── Register the plugin and grab the route renderer ───────────────── */
 
 const ctx = {
   rest,
   register(contribution) {
     STATE.contributions.push(contribution)
-  },
-  i18n: {
-    register(bundles) {
-      BUNDLES = { ...bundles }
-      return () => {}
-    },
-    get t() {
-      return key => BUNDLES[LOCALE]?.[key] ?? BUNDLES.en?.[key] ?? key
-    },
-    onLocaleChange: () => () => {}
   }
 }
 
@@ -143,7 +135,7 @@ const palette = STATE.contributions.find(c => c.area === 'palette')
 if (!route) throw new Error('no route contribution registered')
 if (!nav || !palette) throw new Error('missing nav/palette contributions')
 
-/* ── 渲染 ───────────────────────────────────────────────────────────── */
+/* ── Render ────────────────────────────────────────────────────────── */
 
 const renderPass = () => {
   STATE.effects = []
@@ -151,7 +143,7 @@ const renderPass = () => {
   return { out, effects: STATE.effects }
 }
 
-// 第一遍：调用组件树，收集 useEffect（refresh 在里面）；跑完再渲染一遍拿真实内容。
+// First pass collects useEffect (refresh lives there); the second reads real content.
 const first = renderPass()
 for (const fn of first.effects) fn()
 await new Promise(r => setTimeout(r, 120))
@@ -175,7 +167,7 @@ function collect(node, out, opts = {}) {
     if (props.placeholder) out.push('[placeholder] ' + props.placeholder)
     if (props.title && typeof props.title === 'string') out.push('[title] ' + props.title)
     if (typeof type === 'function') {
-      // 函数组件：按宿主语义调用（hooks 由桩提供）
+      // Function component: call it the way the host does (hooks come from the stub).
       return collect(type(props), out, opts)
     }
     if (props.children !== undefined) collect(props.children, out, opts)

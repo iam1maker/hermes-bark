@@ -1,4 +1,4 @@
-"""Bark 通知 — dashboard backend for the desktop settings page.
+"""Bark notifications — dashboard backend for the desktop settings page.
 
 The renderer calls this router through ``ctx.rest`` (same origin, plugin-scoped
 prefix ``/api/plugins/hermes-bark``), never Bark directly, so:
@@ -9,8 +9,9 @@ prefix ``/api/plugins/hermes-bark``), never Bark directly, so:
   atomic, cross-process locked, rejects secrets), never through a hand-rolled
   YAML edit of the user's config;
 * a key edit goes through the credential lifecycle
-  (``save_provider_env_credential``: rewrites ``.env`` and reconciles mirrors),
-  so the value lands where ``settings.secret()`` will find it.
+  (``save_provider_env_credential``: writes the profile's env file and publishes
+  the value into the live secret scope), so ``settings.secret()`` sees it at
+  once — the plugin itself never reads a dotenv file.
 
 Routes
     GET    /health             liveness only (no network, no config read)
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import re
 import sys
 import time
@@ -41,11 +43,37 @@ ROUTER_VERSION = "1.0.0"
 PLUGIN_ID = "hermes-bark"
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
-# -- 多语言 -------------------------------------------------------------------
-# 语言由前端用 ?lang= 传入（默认中文）。中文原文即键，英文在 _EN 里；
-# 其它语言也回落英文，与桌面端插件 i18n 的策略一致。
+# -- i18n ---------------------------------------------------------------------
+# English is the source language: every message below is written in English and
+# the Chinese copy lives in ``locales/zh.json`` (English source -> Chinese). The
+# renderer asks for a language with ``?lang=``; the same bundle rides along in
+# ``/status.strings`` so the page follows the host language without a second
+# request. Any language code that is not Chinese falls back to English.
 
 _LANG = ContextVar("bark_lang", default="zh")
+_LOCALES = Path(__file__).with_name("locales")
+_BUNDLES: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _bundle(lang: str) -> dict[str, str]:
+    """Translation bundle for ``lang``; empty for English (the source language)."""
+    if not lang or lang == "en":
+        return {}
+    path = _LOCALES / f"{lang}.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    cached = _BUNDLES.get(lang)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    bundle = {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    _BUNDLES[lang] = (mtime, bundle)
+    return bundle
 
 
 async def _lang_dep(request: Request) -> None:
@@ -56,58 +84,15 @@ async def _lang_dep(request: Request) -> None:
     would silently stay Chinese.
     """
     raw = (request.query_params.get("lang") or "").strip().lower()
-    # zh / zh-hant / 未传 → 中文；其它任何语言码 → 英文（与前端 isChinese() 一致）。
+    # zh / zh-hant / unset -> Chinese; any other language code -> English
+    # (matches isChinese() in the renderer).
     _LANG.set("zh" if not raw or raw.startswith("zh") else "en")
 
 
 def _t(text: str, **fmt: Any) -> str:
-    """Localize one message; ``text`` is the Chinese source (also the key)."""
-    out = _EN.get(text, text) if _LANG.get() == "en" else text
+    """Localize one message; ``text`` is the English source (and the key)."""
+    out = _bundle(_LANG.get()).get(text, text)
     return out.format(**fmt) if fmt else out
-
-
-# 中文原文 → 英文。只放会出现在界面上的句子；键必须与 _t(...) 的实参一字不差。
-_EN: dict[str, str] = {
-    "还没有设备密钥：在下面添加一台设备，或把 BARK_TOKEN 填进 Gateway 设置。":
-        "No device key yet — add a device below, or put BARK_TOKEN into the Gateway settings.",
-    "服务器是明文 HTTP（{server}）：设备密钥会以明文经过网络，只建议在局域网自建。":
-        "Server is plain HTTP ({server}): the device key crosses the network in the clear. "
-        "Only do this on a LAN you control.",
-    "config.yaml 里有明文密钥（{names}）：{advice}":
-        "Plaintext key in config.yaml ({names}): {advice}",
-    "建议删除 devices.<alias>.key，改用 BARK_KEY_<ALIAS> 环境变量。":
-        "remove devices.<alias>.key and use a BARK_KEY_<ALIAS> env var instead.",
-    "服务器不可达：{error}":
-        "Server unreachable: {error}",
-    "若本机有代理或 MITM（HTTPS_PROXY），在参数里把「代理」设为 direct 或填真实代理地址后重试。":
-        "If a proxy or MITM (HTTPS_PROXY) is in play, set Proxy to direct (or the real proxy URL) "
-        "under Advanced, then retry.",
-    "服务器有响应但没有返回版本号；推送仍可用，确认是 bark-server。":
-        "Server answers but reports no version; pushes still work — just confirm it really is bark-server.",
-    "插件不在当前 profile 的 plugins.enabled 里：Bark 平台、cron 投递和通知钩子不会生效（此页面本身仍可用）。":
-        "Plugin is not in this profile's plugins.enabled — the Bark platform, cron delivery and "
-        "notify hooks stay off (this page still works).",
-    "自动推送目前全关：cron 与 hermes send 照常可用，只是不会在回合结束时主动响。":
-        "Automatic push is off — cron and hermes send still work; nothing pings you when a turn ends.",
-    "进程环境":
-        "process env",
-    "device_key 不显示；实际请求的 body = 这份 JSON + device_key":
-        "device_key is hidden; the request body = this JSON + device_key",
-    "patch 必须是非空对象":
-        "patch must be a non-empty object",
-    "{key!r} 不在插件的 config_schema 里":
-        "{key!r} is not in the plugin's config_schema",
-    "{key} 必须是 {allowed} 之一":
-        "{key} must be one of {allowed}",
-    "别名不合法":
-        "Invalid alias",
-    "别名只能用字母、数字、点、下划线、连字符（1–32 位）":
-        "Alias allows letters, digits, dot, underscore and hyphen only (1–32 chars)",
-    "缺少设备密钥":
-        "Missing device key",
-    "密钥不像 Bark device key（不能含空白）":
-        "That does not look like a Bark device key (no whitespace allowed)",
-}
 
 
 router = APIRouter(dependencies=[Depends(_lang_dep)])
@@ -207,18 +192,25 @@ def _mask(key: str) -> str:
 
 
 def _env_source(name: str) -> str:
-    """Which file (or process env) currently supplies ``name`` — for the UI only."""
-    import os
+    """Where ``name`` resolves from — Hermes' credential scope or the process env."""
+    source = _settings().secret_source(name)
+    if source == "scope":
+        return _t("profile secret scope")
+    if source == "env":
+        return _t("process environment")
+    return ""
 
-    settings_mod = _settings()
-    for path in settings_mod.env_files():
-        if settings_mod.read_env_file(path).get(name):
-            try:
-                return "~/" + str(path.relative_to(Path.home()))
-            except ValueError:
-                return str(path)
-    if os.environ.get(name):
-        return _t("进程环境")
+
+def _credential_source(settings: Any) -> str:
+    """``scope`` / ``env`` for the config card: where the device keys come from."""
+    mod = _settings()
+    inline = set(getattr(settings, "inline_keys", ()) or ())
+    names = ["BARK_TOKEN"] + [mod.alias_env(alias) for alias in settings.devices if alias not in inline]
+    found = {mod.secret_source(name) for name in names}
+    if "scope" in found:
+        return "scope"
+    if "env" in found:
+        return "env"
     return ""
 
 
@@ -245,34 +237,34 @@ def _warnings(settings: Any, ping: Optional[dict[str, Any]] = None) -> list[dict
     out: list[dict[str, str]] = []
     server = settings.server
     if not settings.devices:
-        out.append({"level": "error", "text": _t("还没有设备密钥：在下面添加一台设备，或把 BARK_TOKEN 填进 Gateway 设置。")})
+        out.append({"level": "error", "text": _t("No device key yet — add a device below, or put BARK_TOKEN into the Gateway settings.")})
     if server.startswith("http://") and not re.match(r"^http://(127\.0\.0\.1|localhost|\[::1\])", server):
         out.append({"level": "warn", "text": _t(
-            "服务器是明文 HTTP（{server}）：设备密钥会以明文经过网络，只建议在局域网自建。", server=server)})
+            "Server is plain HTTP ({server}): the device key crosses the network in the clear. Only do this on a LAN you control.", server=server)})
     if settings.inline_keys:
         out.append({"level": "warn", "text": _t(
-            "config.yaml 里有明文密钥（{names}）：{advice}",
+            "Plaintext key in config.yaml ({names}): {advice}",
             names=", ".join(settings.inline_keys),
-            advice=_t("建议删除 devices.<alias>.key，改用 BARK_KEY_<ALIAS> 环境变量。"))})
+            advice=_t("remove devices.<alias>.key and use a BARK_KEY_<ALIAS> env var instead."))})
     if ping is not None and not ping.get("ok"):
         out.append({"level": "error", "text": _t(
-            "服务器不可达：{error}", error=ping.get("error") or ping.get("status") or "no pong")})
+            "Server unreachable: {error}", error=ping.get("error") or ping.get("status") or "no pong")})
         if not (settings.proxy or "").strip() and any(
                 hint in str(ping.get("error") or "") for hint in ("ConnectError", "refused", "proxy", "getaddrinfo")):
             out.append({"level": "info", "text": _t(
-                "若本机有代理或 MITM（HTTPS_PROXY），在参数里把「代理」设为 direct 或填真实代理地址后重试。")})
+                "If a proxy or MITM (HTTPS_PROXY) is in play, set Proxy to direct (or the real proxy URL) under Advanced, then retry.")})
     elif ping is not None and not ping.get("version"):
-        out.append({"level": "info", "text": _t("服务器有响应但没有返回版本号；推送仍可用，确认是 bark-server。")})
+        out.append({"level": "info", "text": _t("Server answers but reports no version; pushes still work — just confirm it really is bark-server.")})
     try:
         from hermes_cli.plugins_cmd import _get_enabled_set
 
         if PLUGIN_ID not in (_get_enabled_set() or set()):
             out.append({"level": "warn", "text": _t(
-                "插件不在当前 profile 的 plugins.enabled 里：Bark 平台、cron 投递和通知钩子不会生效（此页面本身仍可用）。")})
+                "Plugin is not in this profile's plugins.enabled — the Bark platform, cron delivery and notify hooks stay off (this page still works).")})
     except Exception:  # noqa: BLE001
         pass
     if not settings.notify.get("turn_end", {}).get("enabled") and not settings.notify.get("subagent_stop", {}).get("enabled"):
-        out.append({"level": "info", "text": _t("自动推送目前全关：cron 与 hermes send 照常可用，只是不会在回合结束时主动响。")})
+        out.append({"level": "info", "text": _t("Automatic push is off — cron and hermes send still work; nothing pings you when a turn ends.")})
     return out
 
 
@@ -287,10 +279,10 @@ def _snapshot(ping: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         cfg_path = str(get_config_path())
     except Exception:  # noqa: BLE001
         pass
-    env_paths = [str(p) for p in settings_mod.env_files()]
     schema = _schema()
     return {
         "ok": True,
+        "strings": _bundle(_LANG.get()),
         "plugin": {
             "id": PLUGIN_ID,
             "label": manifest.get("label") or "Bark",
@@ -298,7 +290,7 @@ def _snapshot(ping: Optional[dict[str, Any]] = None) -> dict[str, Any]:
             "router_version": ROUTER_VERSION,
             "dir": str(PLUGIN_DIR),
             "config_path": cfg_path,
-            "env_files": env_paths,
+            "secret_source": _credential_source(settings),
             "config_exists": bool(cfg_path) and Path(cfg_path).exists(),
         },
         "server": {
@@ -344,13 +336,13 @@ def _coerce(schema: Mapping[str, Mapping[str, Any]], patch: Mapping[str, Any]) -
     for key, raw in patch.items():
         spec = schema.get(str(key))
         if spec is None:
-            raise ValueError(_t("{key!r} 不在插件的 config_schema 里", key=key))
+            raise ValueError(_t("{key!r} is not in the plugin's config_schema", key=key))
         kind = str(spec.get("type") or "str").lower()
         if spec.get("choices") or spec.get("enum"):
             value = str(raw)
             allowed = [str(c) for c in (spec.get("choices") or spec.get("enum"))]
             if value not in allowed:
-                raise ValueError(_t("{key} 必须是 {allowed} 之一", key=key, allowed=", ".join(allowed)))
+                raise ValueError(_t("{key} must be one of {allowed}", key=key, allowed=", ".join(allowed)))
         elif kind in ("int", "integer"):
             value = int(float(raw))
         elif kind in ("float", "number"):
@@ -361,7 +353,7 @@ def _coerce(schema: Mapping[str, Mapping[str, Any]], patch: Mapping[str, Any]) -
             elif isinstance(raw, (int, float)):
                 value = bool(raw)
             else:
-                value = str(raw).strip().lower() in ("1", "true", "yes", "on", "开")
+                value = str(raw).strip().lower() in ("1", "true", "yes", "on")
         elif kind in ("list", "array", "dict", "object"):
             value = raw if isinstance(raw, (list, dict)) else []
         else:
@@ -425,7 +417,7 @@ def clear_events() -> dict[str, Any]:
 def save_settings(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     patch = payload.get("patch")
     if not isinstance(patch, Mapping) or not patch:
-        raise HTTPException(status_code=400, detail=_t("patch 必须是非空对象"))
+        raise HTTPException(status_code=400, detail=_t("patch must be a non-empty object"))
     schema = _schema()
     try:
         values = _coerce(schema, patch)
@@ -447,11 +439,11 @@ def add_device(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str
     alias = str(payload.get("alias") or "").strip()
     key = str(payload.get("key") or "").strip()
     if not _ALIAS_RE.fullmatch(alias):
-        raise HTTPException(status_code=400, detail=_t("别名只能用字母、数字、点、下划线、连字符（1–32 位）"))
+        raise HTTPException(status_code=400, detail=_t("Alias allows letters, digits, dot, underscore and hyphen only (1–32 chars)"))
     if not key:
-        raise HTTPException(status_code=400, detail=_t("缺少设备密钥"))
+        raise HTTPException(status_code=400, detail=_t("Missing device key"))
     if len(key) > 200 or any(ch.isspace() for ch in key):
-        raise HTTPException(status_code=400, detail=_t("密钥不像 Bark device key（不能含空白）"))
+        raise HTTPException(status_code=400, detail=_t("That does not look like a Bark device key (no whitespace allowed)"))
     env_name = _settings().alias_env(alias)
     try:
         from hermes_cli.credential_lifecycle import save_provider_env_credential
@@ -467,7 +459,7 @@ def add_device(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str
 @router.delete("/device/{alias}")
 def remove_device(alias: str) -> dict[str, Any]:
     if not _ALIAS_RE.fullmatch(alias or ""):
-        raise HTTPException(status_code=400, detail=_t("别名不合法"))
+        raise HTTPException(status_code=400, detail=_t("Invalid alias"))
     env_name = _settings().alias_env(alias)
     try:
         from hermes_cli.credential_lifecycle import remove_provider_env_credential
@@ -495,7 +487,7 @@ def preview(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, A
         "server": settings.server,
         "endpoint": settings.server + "/push",
         "payload": built,
-        "note": _t("device_key 不显示；实际请求的 body = 这份 JSON + device_key"),
+        "note": _t("device_key is hidden; the request body = this JSON + device_key"),
     }
 
 

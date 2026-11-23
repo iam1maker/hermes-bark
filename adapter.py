@@ -85,7 +85,7 @@ class BarkAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self._settings.configured:
             logger.error(
-                "[bark] no device key: set BARK_TOKEN (or devices.<alias>.key_env) in $HERMES_HOME/.env")
+                "[bark] no device key: set BARK_TOKEN (or devices.<alias>.key_env) via `hermes config set`")
             return False
         logger.info("[bark] send-only adapter ready: server=%s devices=%s",
                     self._settings.server, ",".join(self._settings.devices))
@@ -174,7 +174,7 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
     """Out-of-process delivery (cron tick, ``hermes send``) with no live adapter."""
     settings = load_settings(getattr(pconfig, "extra", {}) or {})
     if not settings.configured:
-        return send_error("Bark is not configured: set BARK_TOKEN in $HERMES_HOME/.env",
+        return send_error("Bark is not configured: set BARK_TOKEN via `hermes config set`",
                           nothing_sent=True)
     try:
         alias, key = settings.resolve(chat_id)

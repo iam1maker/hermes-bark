@@ -94,11 +94,15 @@ def _install_stubs() -> None:
         lines = [line for line in lines if not line.startswith(f"{env_var}=")]
         lines.append(f"{env_var}={value}")
         _ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # Mirror Hermes' _publish_env_value: a credential write is visible to the
+        # running process immediately (the plugin reads only through Hermes).
+        os.environ[env_var] = value
         return {"env_var": env_var, "written": True}
     def _remove_env(env_var):
         _WRITES.append(("rm", env_var))
         lines = _ENV.read_text(encoding="utf-8").splitlines() if _ENV.exists() else []
         _ENV.write_text("\n".join(l for l in lines if not l.startswith(f"{env_var}=")) + "\n", encoding="utf-8")
+        os.environ.pop(env_var, None)
         return {"env_var": env_var, "removed": True}
     life_mod.save_provider_env_credential = _save_env
     life_mod.remove_provider_env_credential = _remove_env
@@ -127,6 +131,17 @@ def _load_router():
     return module
 
 
+def _reset_env() -> None:
+    """What Hermes' own loader leaves behind for this profile: its keys in the env.
+
+    The plugin never reads ``.env`` itself, so the sandbox has to model the loader
+    the same way the real CLI/gateway does.
+    """
+    for name in [key for key in os.environ if key.startswith("BARK_")]:
+        os.environ.pop(name, None)
+    os.environ["BARK_TOKEN"] = DEVICE
+
+
 class DashboardApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -137,6 +152,7 @@ class DashboardApiTests(unittest.TestCase):
         cls.addClassCleanup(cls.bark.stop)
         _install_stubs()
         _ENV.write_text(f"BARK_TOKEN={DEVICE}\n", encoding="utf-8")
+        _reset_env()
         _dump_cfg({
             "plugins": {"entries": {PLUGIN_ID: {"settings": {"group": "FromSettings"}}}},
             "platforms": {"bark": {"extra": {"server": cls.bark.server,
@@ -152,6 +168,7 @@ class DashboardApiTests(unittest.TestCase):
         """Every case starts from the same sandbox profile (they share one temp home)."""
         _WRITES.clear()
         _ENV.write_text(f"BARK_TOKEN={DEVICE}\n", encoding="utf-8")
+        _reset_env()
         _dump_cfg({
             "plugins": {"entries": {PLUGIN_ID: {"settings": {"group": "FromSettings"}}}},
             "platforms": {"bark": {"extra": {"server": self.bark.server,
@@ -176,12 +193,13 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(body["settings"]["values"]["level"], "timeSensitive")
         self.assertEqual(body["settings"]["provenance"]["level"], "default")
         self.assertFalse(body["notify"]["turn_end"]["enabled"])
+        self.assertEqual(body["plugin"]["secret_source"], "env")  # no scope in this host
 
     def test_preview_builds_without_sending(self):
         before = len(self.bark.requests)
-        body = self.client.post(f"{self.prefix}/preview", json={"body": "预览 & 中文"}).json()
+        body = self.client.post(f"{self.prefix}/preview", json={"body": "preview & ünïcode ✓"}).json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["payload"]["body"], "预览 & 中文")
+        self.assertEqual(body["payload"]["body"], "preview & ünïcode ✓")
         self.assertEqual(body["payload"]["group"], "FromSettings")  # settings win over extra
         self.assertNotIn("device_key", body["payload"])
         self.assertEqual(len(self.bark.requests), before)
@@ -193,13 +211,13 @@ class DashboardApiTests(unittest.TestCase):
 
     def test_test_push_hits_server_and_records_event(self):
         before = len(self.bark.requests)
-        body = self.client.post(f"{self.prefix}/test", json={"body": "测试推送 & ok"}).json()
+        body = self.client.post(f"{self.prefix}/test", json={"body": "push test & ✓ ok"}).json()
         self.assertTrue(body["ok"], body)
         self.assertEqual(body["status"], 200)
         self.assertGreaterEqual(body["latency_ms"], 0)
         self.assertEqual(len(self.bark.requests), before + 1)
         sent = self.bark.requests[-1]["payload"]
-        self.assertEqual(sent["body"], "测试推送 & ok")
+        self.assertEqual(sent["body"], "push test & ✓ ok")
         self.assertEqual(sent["device_key"], DEVICE)
         self.assertEqual(body["events"][0]["ok"], True)
         self.assertEqual(body["events"][0]["source"], "dashboard")
@@ -239,6 +257,14 @@ class DashboardApiTests(unittest.TestCase):
         after = self.client.delete(f"{self.prefix}/device/iphone").json()
         self.assertNotIn("iphone", [d["alias"] for d in after["devices"]])
         self.assertNotIn("BARK_KEY_IPHONE", _ENV.read_text(encoding="utf-8"))
+
+    def test_dotenv_is_never_read_by_the_plugin(self):
+        """Catalog rule 11: a key sitting only in the file (not in Hermes' view) stays invisible."""
+        _ENV.write_text(f"BARK_TOKEN={DEVICE}\nBARK_KEY_GHOST=GgHhIiJjKkLlMmNnOoPp\n", encoding="utf-8")
+        body = self.client.get(f"{self.prefix}/status?fresh=1").json()
+        aliases = [d["alias"] for d in body["devices"]]
+        self.assertNotIn("ghost", aliases)
+        self.assertNotIn("GgHhIiJjKkLlMmNnOoPp", str(body))
 
     def test_device_validation(self):
         self.assertEqual(self.client.post(f"{self.prefix}/device", json={"alias": "bad alias", "key": "x"}).status_code, 400)

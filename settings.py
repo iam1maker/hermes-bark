@@ -12,11 +12,13 @@ Two configuration surfaces, one merged view:
   platform-only install keeps working; settings win over it key by key.
 
 Secrets never live in either: they come from ``BARK_TOKEN`` / ``BARK_KEY_<ALIAS>``.
-Read order is profile-scoped secret → process env → ``.env`` files, most
-specific first (the plugin's own profile home, ``$HERMES_HOME``, ``~/.hermes``).
-The ``.env`` walk is deliberate: under a routed profile the gateway deliberately
-does not load that profile's dotenv into ``os.environ``, so a scoped-secret-only
-read shows nothing for a key the user just saved in the Dashboard.
+Hermes owns credential routing and the plugin never parses ``.env`` itself
+(catalog rule 11): a read goes through ``gateway.platforms._shared.get_scoped_secret``,
+which returns the *installed profile* secret scope when one is bound — including
+keys saved moments ago, because Hermes' ``_publish_env_value`` publishes a
+credential write into that same scope — and falls back to ``os.environ`` only
+when the process has no scope (CLI, single-profile). A scoped miss is fail-closed:
+another profile's value is never borrowed.
 """
 
 from __future__ import annotations
@@ -74,72 +76,55 @@ def _profile_home() -> Optional[Path]:
     return None
 
 
-def env_files() -> tuple[Path, ...]:
-    """``.env`` candidates, most specific first, deduplicated."""
-    seen: list[Path] = []
-    candidates: list[Path] = []
-    home = _profile_home()
-    if home is not None:
-        candidates.append(home / ".env")
-    env_home = os.environ.get("HERMES_HOME")
-    if env_home:
-        candidates.append(Path(env_home) / ".env")
-    candidates.append(Path.home() / ".hermes" / ".env")
-    for path in candidates:
-        resolved = path.expanduser()
-        if resolved not in seen:
-            seen.append(resolved)
-    return tuple(seen)
-
-
-def read_env_file(path: Path) -> dict[str, str]:
-    """Minimal ``.env`` parser: KEY=VALUE, quotes, ``export``, comment lines."""
-    out: dict[str, str] = {}
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if not key or value.startswith("op://"):
-            continue  # unexpanded 1Password reference is not a value
-        out[key] = value
-    return out
-
-
-def _env_file_value(name: str) -> str:
-    for path in env_files():
-        value = read_env_file(path).get(name)
-        if value:
-            return value
-    return ""
-
-
 def secret(name: str, default: str = "") -> str:
-    """Profile-scoped secret read with a disk fallback for routed profiles."""
-    value = ""
+    """Profile-scoped credential read — Hermes routes it, the plugin never reads files.
+
+    ``get_scoped_secret`` is authoritative when a scope is bound (a scoped miss
+    returns the default rather than borrowing ``os.environ``); ``external_fallback``
+    builds this profile's own scope for startup paths that run before one exists.
+    Only outside a Hermes runtime (unit tests, a bare host) is ``os.environ`` read
+    directly.
+    """
     try:
         from gateway.platforms._shared import get_scoped_secret
-    except ImportError:  # outside a Hermes runtime (unit tests)
-        pass
-    else:
-        try:
-            value = (get_scoped_secret(name, default) or "").strip()
-        except Exception:  # noqa: BLE001 — a broken scope must not kill a send
-            value = ""
-    if not value:
-        value = (os.environ.get(name) or "").strip()
-    if not value:
-        value = _env_file_value(name).strip()
-    return value or default
+    except ImportError:  # outside a Hermes runtime
+        return (os.environ.get(name) or "").strip() or default
+    try:
+        value = get_scoped_secret(name, "", external_fallback=True)
+    except Exception:  # noqa: BLE001 — a broken scope must not kill a send
+        value = ""
+    return str(value or "").strip() or default
+
+
+def secret_names(prefix: str = "BARK_") -> set[str]:
+    """Credential names this profile can see, via the scope and the process env."""
+    names = {key for key in os.environ if key.startswith(prefix)}
+    try:
+        from agent.secret_scope import current_secret_scope
+    except ImportError:
+        return names
+    try:
+        scope = current_secret_scope()
+    except Exception:  # noqa: BLE001
+        scope = None
+    if isinstance(scope, Mapping):
+        names |= {str(key) for key in scope if str(key).startswith(prefix)}
+    return names
+
+
+def secret_source(name: str) -> str:
+    """``"scope"`` / ``"env"`` / ``""`` for display only — never the value."""
+    try:
+        from agent.secret_scope import current_secret_scope
+
+        scope = current_secret_scope()
+    except Exception:  # noqa: BLE001
+        scope = None
+    if isinstance(scope, Mapping) and str(scope.get(name) or "").strip():
+        return "scope"
+    if (os.environ.get(name) or "").strip():
+        return "env"
+    return ""
 
 
 def alias_env(alias: str) -> str:
@@ -153,12 +138,9 @@ def alias_from_env(name: str) -> str:
 
 
 def env_aliases() -> dict[str, str]:
-    """Aliases that exist only as ``BARK_KEY_<ALIAS>`` anywhere we can see."""
-    names: set[str] = {k for k in os.environ if k.startswith("BARK_KEY_")}
-    for path in env_files():
-        names |= {k for k in read_env_file(path) if k.startswith("BARK_KEY_")}
+    """Aliases that exist as ``BARK_KEY_<ALIAS>`` in this profile's credential scope."""
     out: dict[str, str] = {}
-    for name in sorted(names):
+    for name in sorted(secret_names("BARK_KEY_")):
         alias = alias_from_env(name)
         if alias and alias not in out:
             out[alias] = secret(name)

@@ -59,7 +59,7 @@ def _settings_or_hint():
     settings = load_from_config()
     if not settings.configured:
         print("Bark is not configured.")
-        print("  set BARK_TOKEN=<device key> in $HERMES_HOME/.env, then re-run.")
+        print("  set BARK_TOKEN=<device key> (hermes config set BARK_TOKEN …, or the plugin page), then re-run.")
         print("  (config reference: platforms.bark.extra in the TD)")
     return settings
 
@@ -103,7 +103,7 @@ async def _doctor() -> int:
         print(f"device {alias}: {masked} ({len(key)} chars)")
     if settings.inline_keys:
         print(f"  ! keys written inline in config.yaml for: {', '.join(settings.inline_keys)}")
-        print("    move them to $HERMES_HOME/.env (config.yaml is backed up in plaintext)")
+        print("    move them to a BARK_KEY_<ALIAS> credential (config.yaml is backed up in plaintext)")
 
     rules = settings.rule("turn_end"), settings.rule("subagent_stop")
     print(f"notify.turn_end: {'on' if rules[0].get('enabled') else 'off'}")

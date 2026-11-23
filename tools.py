@@ -68,7 +68,7 @@ async def handle_bark_notify(args: dict[str, Any], **_kw: Any) -> str:
     settings = load_settings(_extra())
     if not settings.configured:
         return json.dumps({"ok": False,
-                           "error": "Bark is not configured: set BARK_TOKEN in $HERMES_HOME/.env"})
+                           "error": "Bark is not configured: set BARK_TOKEN via `hermes config set`"})
     try:
         alias, key = settings.resolve(args.get("device") or None)
     except TargetError as exc:

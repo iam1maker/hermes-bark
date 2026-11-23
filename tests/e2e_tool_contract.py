@@ -58,7 +58,7 @@ def main() -> int:
             "required": entry.schema.get("required"),
             "required_env": list(entry.requires_env or []),
         },
-        "ok_call": call({"body": "tool handler 调用", "title": "Tool", "level": "active"}),
+        "ok_call": call({"body": "tool handler ✓", "title": "Tool", "level": "active"}),
         "bad_device": call({"body": "x", "device": "nope"}),
     }
     print(json.dumps(results, ensure_ascii=False, indent=2))
