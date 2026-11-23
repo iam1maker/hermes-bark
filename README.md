@@ -41,7 +41,7 @@ BARK_HOME_CHANNEL=default                      # cron / `--to bark` target
 ```
 
 Device keys are **routed by Hermes**, never read from disk by this plugin: a read
-goes through `gateway.platforms._shared.get_scoped_secret`, i.e. the profile's
+goes through `agent.secret_scope.get_secret`, i.e. the profile's
 secret scope (with a process-env fallback in CLI contexts). That is also why a
 key saved on the page is usable immediately. `config.yaml` never holds a key;
 non-secret defaults (`server`, `level`, `group`, `ttl`, notification rules, …)
@@ -79,7 +79,7 @@ and at `hermes://open/bark`.
   and `image` URL you pass, are sent there and reach APNs through it. If you
   self-host, that server sees them.
 - No telemetry, no analytics, no self-updater, no outbound calls anywhere else.
-- Secrets are read via Hermes (`gateway.platforms._shared.get_scoped_secret` →
+- Secrets are read via Hermes (`agent.secret_scope.get_secret` →
   `agent.secret_scope`); the plugin never parses `.env` itself, and a routed
   profile never borrows another profile's key.
 - Delivery records (last 400 attempts, 250 kept) are written locally to

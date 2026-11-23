@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - httpx ships with Hermes
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.send_targets import parse_nonempty
-from gateway.platforms._shared import get_scoped_secret, seed_extra_from_env, send_error
+from gateway.platforms._shared import seed_extra_from_env, send_error
 
 try:  # package import (plugin loader)
     from . import events

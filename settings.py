@@ -13,12 +13,12 @@ Two configuration surfaces, one merged view:
 
 Secrets never live in either: they come from ``BARK_TOKEN`` / ``BARK_KEY_<ALIAS>``.
 Hermes owns credential routing and the plugin never parses ``.env`` itself
-(catalog rule 11): a read goes through ``gateway.platforms._shared.get_scoped_secret``,
-which returns the *installed profile* secret scope when one is bound — including
-keys saved moments ago, because Hermes' ``_publish_env_value`` publishes a
-credential write into that same scope — and falls back to ``os.environ`` only
-when the process has no scope (CLI, single-profile). A scoped miss is fail-closed:
-another profile's value is never borrowed.
+(catalog rule 11): a read goes through ``agent.secret_scope.get_secret``, which
+returns the *installed profile* secret scope when one is bound — including keys
+saved moments ago, because a credential write publishes into that same scope —
+and falls back to ``os.environ`` only when the process has no scope (CLI,
+single-profile). A scoped miss under multiplexing is fail-closed: another
+profile's value is never borrowed.
 """
 
 from __future__ import annotations
@@ -79,20 +79,31 @@ def _profile_home() -> Optional[Path]:
 def secret(name: str, default: str = "") -> str:
     """Profile-scoped credential read — Hermes routes it, the plugin never reads files.
 
-    ``get_scoped_secret`` is authoritative when a scope is bound (a scoped miss
-    returns the default rather than borrowing ``os.environ``); ``external_fallback``
-    builds this profile's own scope for startup paths that run before one exists.
-    Only outside a Hermes runtime (unit tests, a bare host) is ``os.environ`` read
-    directly.
+    ``agent.secret_scope.get_secret`` is the public route named by catalog rule 11:
+    it returns the active profile's value and, under multiplexing with no scope
+    bound, raises instead of borrowing another profile's key. The gateway's
+    ``get_scoped_secret`` is the second rung: it wraps the same call and adds the
+    documented unscoped-startup fallback (a profile scope built on demand), which
+    the CLI and cron paths rely on. Only when neither is importable — a bare host
+    or a unit-test process — is ``os.environ`` read directly. Any raise or miss is
+    reported as ``default``; a broken scope never kills a send.
     """
+    value: Optional[str] = None
     try:
-        from gateway.platforms._shared import get_scoped_secret
-    except ImportError:  # outside a Hermes runtime
-        return (os.environ.get(name) or "").strip() or default
-    try:
-        value = get_scoped_secret(name, "", external_fallback=True)
-    except Exception:  # noqa: BLE001 — a broken scope must not kill a send
-        value = ""
+        from agent.secret_scope import get_secret
+
+        value = get_secret(name, None)
+    except Exception:  # noqa: BLE001
+        value = None
+    if value is None:
+        try:
+            from gateway.platforms._shared import get_scoped_secret
+
+            value = get_scoped_secret(name, None, external_fallback=True)
+        except Exception:  # noqa: BLE001
+            value = None
+    if value is None:
+        value = os.environ.get(name)
     return str(value or "").strip() or default
 
 
