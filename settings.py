@@ -127,11 +127,17 @@ def secret_names(prefix: str = "BARK_") -> set[str]:
 
 
 def secret_source(name: str) -> str:
-    """``"scope"`` / ``"env"`` / ``""`` for display only — never the value."""
+    """``"scope"`` / ``"env"`` / ``""`` for display only — never the value.
+
+    ``"env"`` covers everything a process without a bound scope resolves through
+    (process environment, or the profile's own secret mapping behind
+    ``get_scoped_secret``), so the page never says "not set" while ``secret()``
+    happily returns a value.
+    """
     scope = _active_scope()
     if scope is not None:
         return "scope" if str(scope.get(name) or "").strip() else ""
-    return "env" if (os.environ.get(name) or "").strip() else ""
+    return "env" if secret(name) else ""
 
 
 def alias_env(alias: str) -> str:

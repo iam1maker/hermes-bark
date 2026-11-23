@@ -1174,7 +1174,7 @@ function ConfigCard({ snap }) {
     [t('Plugin version'), (plugin.version || '—') + (plugin.router_version ? ' · api ' + plugin.router_version : '')],
     ['config.yaml', plugin.config_path || '—'],
     [t('Credentials'), plugin.secret_source === 'scope' ? t('profile secret scope')
-      : plugin.secret_source === 'env' ? t('process environment') : '—'],
+      : plugin.secret_source === 'env' ? t('environment or profile secrets') : '—'],
     [t('Plugin dir'), plugin.dir || '—'],
     [t('Server'), (snap && snap.server && snap.server.url) || '—'],
     [t('Notification rules'), snap && snap.notify ? JSON.stringify(snap.notify) : '—']
