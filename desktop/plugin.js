@@ -845,11 +845,11 @@ function DevicesCard({ snap }) {
                   padding: '1px 6px'
                 }
               }, t('default')) : null,
-              row.source === 'inline' ? h('span', {
+              row.misplaced ? h('span', {
                 key: 'i',
-                title: t('Key sits in config.yaml as plaintext'),
+                title: t('Literal key in config.yaml: refused, not used'),
                 style: { fontSize: FS.micro, color: C.orange, border: '1px solid ' + TINT(C.orange, 45), borderRadius: 5, padding: '1px 6px' }
-              }, t('plaintext')) : null,
+              }, t('ignored')) : null,
               h('button', {
                 key: 'x',
                 type: 'button',
@@ -1107,7 +1107,7 @@ function TestCard({ snap }) {
 
 /* ── Component: recent deliveries ────────────────────────────────────── */
 
-const SOURCE_CN = { notify: t('notify'), send: t('send'), cron: 'cron', dashboard: t('test') }
+const SOURCE_CN = { notify: t('notify'), send: t('send'), standalone: t('cron / send'), cron: 'cron', tool: t('tool'), cli: t('cli'), dashboard: t('test') }
 
 function EventsCard({ snap }) {
   const events = (snap && snap.events) || []

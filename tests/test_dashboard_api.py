@@ -195,6 +195,20 @@ class DashboardApiTests(unittest.TestCase):
         self.assertFalse(body["notify"]["turn_end"]["enabled"])
         self.assertEqual(body["plugin"]["secret_source"], "env")  # no scope in this host
 
+    def test_literal_key_row_is_flagged_not_used(self):
+        _dump_cfg({
+            "plugins": {"entries": {PLUGIN_ID: {"settings": {}}}},
+            "platforms": {"bark": {"extra": {"server": self.bark.server,
+                                             "devices": {"phone": {"key": "x" * 22}}}}},
+        })
+        body = self.client.get(f"{self.prefix}/status?fresh=1").json()
+        rows = {row["alias"]: row for row in body["devices"]}
+        self.assertIn("phone", rows)                       # still visible, so it can be fixed
+        self.assertTrue(rows["phone"]["misplaced"])
+        self.assertEqual(rows["phone"]["masked"], "")
+        self.assertNotIn("x" * 22, str(body))
+        self.assertTrue(any("config.yaml" in w["text"] for w in body["warnings"]))
+
     def test_preview_builds_without_sending(self):
         before = len(self.bark.requests)
         body = self.client.post(f"{self.prefix}/preview", json={"body": "preview & ünïcode ✓"}).json()

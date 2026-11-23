@@ -12,9 +12,11 @@ import sys
 from typing import Optional
 
 try:  # package import
+    from . import events
     from .bark_client import build_payload, explain_probe, ping, push
     from .settings import load_from_config
 except ImportError:  # direct-path import (tests)
+    import events
     from bark_client import build_payload, explain_probe, ping, push
     from settings import load_from_config
 
@@ -101,8 +103,8 @@ async def _doctor() -> int:
     for alias, key in settings.devices.items():
         masked = f"***{key[-4:]}" if len(key) > 4 else "***"
         print(f"device {alias}: {masked} ({len(key)} chars)")
-    if settings.inline_keys:
-        print(f"  ! keys written inline in config.yaml for: {', '.join(settings.inline_keys)}")
+    if settings.misplaced_keys:
+        print(f"  ! plaintext keys in config.yaml for: {', '.join(settings.misplaced_keys)} (refused, not used)")
         print("    move them to a BARK_KEY_<ALIAS> credential (config.yaml is backed up in plaintext)")
 
     rules = settings.rule("turn_end"), settings.rule("subagent_stop")
@@ -130,6 +132,12 @@ async def _test(args: argparse.Namespace) -> int:
         fields["level"] = args.level
     payload = build_payload(**fields)
     result = await push(settings.server, key, payload, proxy=settings.proxy)
+    events.record(
+        source="cli", ok=not result.get("error"), alias=alias, body=args.body,
+        title=str(payload.get("title") or ""), error=str(result.get("error") or ""),
+        status=result.get("status"), latency_ms=result.get("latency_ms"),
+        message_id=str(result.get("message_id") or ""),
+    )
     if result.get("error"):
         print(f"failed ({result.get('error_kind')}): {result['error']}")
         return 1

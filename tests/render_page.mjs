@@ -33,7 +33,7 @@ const STATE = { contributions: [], rest: [], snapshot: null }
 const snapshot = {
   ok: true,
   strings: STRINGS,
-  plugin: { id: 'hermes-bark', label: 'Bark', version: '0.2.0', router_version: '1.0.0', dir: '/tmp/x', config_path: '/tmp/x/config.yaml', secret_source: 'env', config_exists: true },
+  plugin: { id: 'hermes-bark', label: 'Bark', version: '0.2.1', router_version: '1.0.0', dir: '/tmp/x', config_path: '/tmp/x/config.yaml', secret_source: 'env', config_exists: true },
   server: { url: 'https://api.day.app', host: 'api.day.app', proxy: '', ping: { ok: true, status: 200, ms: 210, version: '2.2.5', body: 'pong' } },
   devices: [{ alias: 'default', masked: '••••voyF', is_default: true, env: 'BARK_KEY_DEFAULT', source: 'env', where: '.env', from_extra: false }],
   default_device: 'default',

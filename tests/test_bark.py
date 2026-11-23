@@ -11,13 +11,14 @@ import os
 import sys
 import tempfile
 import time
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
 
-# Hermetic: settings.secret() now also reads .env files (that is how a key saved
-# in the Dashboard reaches a routed profile), so a test run must never see the
-# developer's real HOME. Isolate before importing anything from the plugin.
+# Hermetic: settings.secret() reads Hermes' credential scope and, with no scope
+# bound (the case here), the process environment — so a test run must never see
+# the developer's real HOME or a real BARK_* key. Isolate before importing.
 _SANDBOX = tempfile.mkdtemp(prefix="bark-test-home-")
 os.environ["HOME"] = _SANDBOX
 os.environ["HERMES_HOME"] = str(Path(_SANDBOX) / "hermes")
@@ -98,16 +99,83 @@ class TargetTests(unittest.TestCase):
         with self.assertRaises(TargetError):
             Settings().resolve("")
 
-    def test_inline_key_and_env_alias(self):
+    def test_literal_key_in_config_is_refused(self):
+        # A key typed into config.yaml must never be used as a credential; it is
+        # reported so the page/CLI can point at it, and the alias keeps no device.
         loaded = load_settings({"devices": {"phone": DEVICE, "tab": {"key": "x" * 22}}})
-        self.assertEqual(loaded.devices["phone"], DEVICE)
-        self.assertEqual(sorted(loaded.inline_keys), ["phone", "tab"])
-        self.assertEqual(loaded.default_device, "phone")
+        self.assertEqual(loaded.devices, {})
+        self.assertEqual(sorted(loaded.misplaced_keys), ["phone", "tab"])
+        self.assertNotIn(DEVICE, json.dumps(loaded.redacted()))
+
+    def test_device_from_named_key_env(self):
+        os.environ["BARK_KEY_TAB"] = "T" * 22
+        try:
+            loaded = load_settings({"devices": {"tab": {"key_env": "BARK_KEY_TAB"}}})
+            self.assertEqual(loaded.devices["tab"], "T" * 22)
+            self.assertEqual(loaded.default_device, "tab")
+        finally:
+            os.environ.pop("BARK_KEY_TAB", None)
+
+    def test_token_survives_alias_env(self):
+        # BARK_TOKEN + BARK_KEY_* used to leave `default` uncreated (setdefault
+        # ordering bug), so `default_device` silently jumped to the alias.
+        os.environ["BARK_TOKEN"] = DEVICE
+        os.environ["BARK_KEY_IPHONE"] = "I" * 22
+        try:
+            loaded = load_settings({})
+            self.assertEqual(loaded.devices["default"], DEVICE)
+            self.assertEqual(loaded.devices["iphone"], "I" * 22)
+            self.assertEqual(loaded.default_device, "default")
+        finally:
+            os.environ.pop("BARK_TOKEN", None)
+            os.environ.pop("BARK_KEY_IPHONE", None)
 
     def test_env_name_spec_is_not_treated_as_key(self):
         # No Hermes runtime -> unresolved env var -> device dropped, not a bogus key.
         loaded = load_settings({"devices": {"phone": "BARK_KEY_PHONE"}})
         self.assertEqual(loaded.devices, {})
+
+
+class ScopedSecretTests(unittest.TestCase):
+    """F1: a bound profile secret scope is authoritative — os.environ never wins."""
+
+    def _bind(self, scope: dict) -> None:
+        pkg = types.ModuleType("agent")
+        mod = types.ModuleType("agent.secret_scope")
+        mod.current_secret_scope = lambda: dict(scope)  # type: ignore[attr-defined]
+        mod.get_secret = lambda name, default=None: scope.get(name, default)  # type: ignore[attr-defined]
+        pkg.secret_scope = mod  # type: ignore[attr-defined]
+        self._saved = {name: sys.modules.get(name) for name in ("agent", "agent.secret_scope")}
+        sys.modules["agent"] = pkg
+        sys.modules["agent.secret_scope"] = mod
+
+    def tearDown(self):
+        for name, module in getattr(self, "_saved", {}).items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def test_scope_wins_over_environment(self):
+        os.environ["BARK_TOKEN"] = "E" * 22
+        self.addCleanup(os.environ.pop, "BARK_TOKEN", None)
+        self._bind({"BARK_TOKEN": "S" * 22})
+        self.assertEqual(settings_mod.secret("BARK_TOKEN"), "S" * 22)
+        self.assertEqual(settings_mod.secret_source("BARK_TOKEN"), "scope")
+        self.assertEqual(load_settings({}).devices["default"], "S" * 22)
+
+    def test_scoped_miss_is_fail_closed(self):
+        # The launch profile's key sitting in os.environ must not be borrowed.
+        os.environ["BARK_TOKEN"] = "E" * 22
+        os.environ["BARK_KEY_IPHONE"] = "I" * 22
+        self.addCleanup(os.environ.pop, "BARK_TOKEN", None)
+        self.addCleanup(os.environ.pop, "BARK_KEY_IPHONE", None)
+        self._bind({"BARK_SERVER": "https://example.test"})
+        self.assertEqual(settings_mod.secret("BARK_TOKEN"), "")
+        self.assertEqual(settings_mod.secret_source("BARK_TOKEN"), "")
+        self.assertEqual(settings_mod.secret_names("BARK_"), {"BARK_SERVER"})
+        self.assertEqual(settings_mod.env_aliases(), {})
+        self.assertEqual(load_settings({}).devices, {})
 
 
 class SafetyTests(unittest.TestCase):
@@ -166,12 +234,27 @@ class PushTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error", result)
         self.assertEqual(result["error_kind"], "forbidden")
         self.assertEqual(len(self.fake.requests), 1)
+        # Answered by the server: replaying it could double-buzz the phone.
+        self.assertFalse(result["never_left"])
 
     async def test_429_is_retried(self):
         self.fake.fail_queue.append((429, {"Retry-After": "0"}))
         result = await bc.push(self.fake.server, DEVICE, {"body": "x"}, attempts=2)
         self.assertTrue(result["success"])
         self.assertEqual(len(self.fake.requests), 2)
+
+    async def test_exhausted_429_stays_retryable_but_not_never_left(self):
+        self.fake.fail_queue.extend([(429, {"Retry-After": "0"}), (429, {"Retry-After": "0"})])
+        result = await bc.push(self.fake.server, DEVICE, {"body": "x"}, attempts=2)
+        self.assertEqual(result["error_kind"], "rate_limited")
+        self.assertTrue(result["retryable"])
+        self.assertFalse(result["never_left"])
+
+    async def test_exhausted_500_is_not_never_left(self):
+        self.fake.fail_queue.extend([(500, {}), (500, {})])
+        result = await bc.push(self.fake.server, DEVICE, {"body": "x"}, attempts=2)
+        self.assertTrue(result["retryable"])
+        self.assertFalse(result["never_left"])
 
     async def test_connection_refused_is_reported_and_redacted(self):
         dead = FakeBark().start()
@@ -180,6 +263,8 @@ class PushTests(unittest.IsolatedAsyncioTestCase):
         result = await bc.push(url, DEVICE, {"body": "x"}, timeout=1.0, attempts=1)
         self.assertIn("error", result)
         self.assertNotIn(DEVICE, result["error"])
+        # The request provably never left, so cron may replay it.
+        self.assertTrue(result["never_left"])
 
     async def test_ping(self):
         result = await bc.ping(self.fake.server)
@@ -304,10 +389,11 @@ class NotifyRuleTests(unittest.TestCase):
 
         fake = FakeBark().start()
         self.addCleanup(fake.stop)
+        os.environ["BARK_KEY_TEST"] = DEVICE
+        self.addCleanup(os.environ.pop, "BARK_KEY_TEST", None)
         settings = load_settings({
             "server": fake.server,
             "default_device": "test",
-            "devices": {"test": DEVICE},
             "defaults": {"level": "timeSensitive", "group": "HermesE2E"},
         })
         asyncio.run(notify._send(settings, "no rule level"))
@@ -320,10 +406,11 @@ class NotifyRuleTests(unittest.TestCase):
 
         fake = FakeBark().start()
         self.addCleanup(fake.stop)
+        os.environ["BARK_KEY_TEST"] = DEVICE
+        self.addCleanup(os.environ.pop, "BARK_KEY_TEST", None)
         settings = load_settings({
             "server": fake.server,
             "default_device": "test",
-            "devices": {"test": DEVICE},
             "notify": {"turn_end": {"enabled": True, "statuses": ["completed"], "min_duration_s": 0}},
         })
         original = notify.load_from_config

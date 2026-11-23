@@ -74,16 +74,29 @@ and at `hermes://open/bark`.
 
 ## Disclosure
 
-- Outbound HTTPS to your Bark server only: `https://api.day.app` by default, or
-  whatever `BARK_SERVER` points at. Notification titles/bodies, plus any `url`
-  and `image` URL you pass, are sent there and reach APNs through it. If you
-  self-host, that server sees them.
+- Outbound requests go to your Bark server only: `https://api.day.app` by
+  default, or whatever `BARK_SERVER` points at. Plain `http://` is accepted for
+  a LAN you control and warned about, never silently upgraded. Notification
+  titles/bodies, plus any `url` and `image` URL you pass, are sent there and
+  reach APNs through it. If you self-host, that server sees them.
 - No telemetry, no analytics, no self-updater, no outbound calls anywhere else.
 - Secrets are read via Hermes (`agent.secret_scope.get_secret` →
-  `agent.secret_scope`); the plugin never parses `.env` itself, and a routed
-  profile never borrows another profile's key.
+  `gateway.platforms._shared.get_scoped_secret`, `external_fallback` only when no
+  profile scope is bound); the plugin never parses `.env` itself, and a bound
+  scope is authoritative — a scoped miss returns nothing rather than borrowing
+  another profile's value. A literal key in `config.yaml` is refused and reported
+  as `ignored`, never used.
+- Settings saved from the desktop page are written to
+  `plugins.entries.hermes-bark.settings` in your `config.yaml` through
+  `save_plugin_settings` (atomic, schema-validated). Adding or removing a device
+  writes the device key through Hermes' credential lifecycle
+  (`save_provider_env_credential` / `remove_provider_env_credential`, i.e. the
+  profile `.env` plus the live secret scope) — the plugin does not touch that
+  file itself.
 - Delivery records (last 400 attempts, 250 kept) are written locally to
-  `<hermes home>/plugin-data/hermes-bark/deliveries.jsonl`.
+  `<hermes home>/plugin-data/hermes-bark/deliveries.jsonl`. Every path that pushes
+  records one: hooks, the `bark_notify` tool, the adapter, cron/`hermes send`
+  (standalone), the CLI test, and the page's test button.
 - The desktop page calls only the plugin's own routes under
   `/api/plugins/hermes-bark/`.
 - UI copy: English is the source language; the Chinese bundle is a data file

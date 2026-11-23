@@ -11,14 +11,15 @@ Two configuration surfaces, one merged view:
   ``notify`` rules, ``defaults``). Still honoured so an existing config or a
   platform-only install keeps working; settings win over it key by key.
 
-Secrets never live in either: they come from ``BARK_TOKEN`` / ``BARK_KEY_<ALIAS>``.
-Hermes owns credential routing and the plugin never parses ``.env`` itself
-(catalog rule 11): a read goes through ``agent.secret_scope.get_secret``, which
-returns the *installed profile* secret scope when one is bound — including keys
-saved moments ago, because a credential write publishes into that same scope —
-and falls back to ``os.environ`` only when the process has no scope (CLI,
-single-profile). A scoped miss under multiplexing is fail-closed: another
-profile's value is never borrowed.
+Secrets never live in either: they come from ``BARK_TOKEN`` / ``BARK_KEY_<ALIAS>``,
+and a literal key typed into ``config.yaml`` is refused (reported as
+``misplaced_keys``, never used). Hermes owns credential routing and the plugin
+never parses ``.env`` itself (catalog rule 11): a read goes through the *installed
+profile* secret scope when one is bound — including keys saved moments ago,
+because a credential write publishes into that same scope — and only a process
+with no scope at all (bare host, default-profile startup, unit test) reads
+``os.environ``. A scoped miss is fail-closed: another profile's key is never
+borrowed.
 """
 
 from __future__ import annotations
@@ -76,66 +77,61 @@ def _profile_home() -> Optional[Path]:
     return None
 
 
+def _active_scope() -> Optional[Mapping[str, str]]:
+    """The bound profile secret scope, or ``None`` when this process has none."""
+    try:
+        from agent.secret_scope import current_secret_scope
+    except Exception:  # noqa: BLE001 — no Hermes runtime (bare host, unit tests)
+        return None
+    try:
+        scope = current_secret_scope()
+    except Exception:  # noqa: BLE001
+        return None
+    return scope if isinstance(scope, Mapping) else None
+
+
 def secret(name: str, default: str = "") -> str:
     """Profile-scoped credential read — Hermes routes it, the plugin never reads files.
 
-    ``agent.secret_scope.get_secret`` is the public route named by catalog rule 11:
-    it returns the active profile's value and, under multiplexing with no scope
-    bound, raises instead of borrowing another profile's key. The gateway's
-    ``get_scoped_secret`` is the second rung: it wraps the same call and adds the
-    documented unscoped-startup fallback (a profile scope built on demand), which
-    the CLI and cron paths rely on. Only when neither is importable — a bare host
-    or a unit-test process — is ``os.environ`` read directly. Any raise or miss is
-    reported as ``default``; a broken scope never kills a send.
+    An installed profile secret scope is authoritative (core's contract:
+    ``agent/secret_scope.get_secret`` returns the active profile's value and a
+    scoped miss is fail-closed, ``UnscopedSecretError`` included). Reading
+    ``os.environ`` on a scoped miss would hand a routed profile the launch
+    profile's key, so that fallback is only allowed when this process has no
+    scope at all — a bare host, the default profile's unscoped startup, or a
+    unit test. ``gateway.platforms._shared.get_scoped_secret`` is the second
+    rung because it encodes that same rule and adds the documented
+    unscoped-startup scope build.
     """
+    scope = _active_scope()
+    if scope is not None:
+        return str(scope.get(name) or "").strip() or default
     value: Optional[str] = None
     try:
-        from agent.secret_scope import get_secret
+        from gateway.platforms._shared import get_scoped_secret
 
-        value = get_secret(name, None)
+        value = get_scoped_secret(name, None, external_fallback=True)
     except Exception:  # noqa: BLE001
         value = None
-    if value is None:
-        try:
-            from gateway.platforms._shared import get_scoped_secret
-
-            value = get_scoped_secret(name, None, external_fallback=True)
-        except Exception:  # noqa: BLE001
-            value = None
     if value is None:
         value = os.environ.get(name)
     return str(value or "").strip() or default
 
 
 def secret_names(prefix: str = "BARK_") -> set[str]:
-    """Credential names this profile can see, via the scope and the process env."""
-    names = {key for key in os.environ if key.startswith(prefix)}
-    try:
-        from agent.secret_scope import current_secret_scope
-    except ImportError:
-        return names
-    try:
-        scope = current_secret_scope()
-    except Exception:  # noqa: BLE001
-        scope = None
-    if isinstance(scope, Mapping):
-        names |= {str(key) for key in scope if str(key).startswith(prefix)}
-    return names
+    """Credential names this profile can see — scope-only when one is bound."""
+    scope = _active_scope()
+    if scope is not None:
+        return {str(key) for key in scope if str(key).startswith(prefix)}
+    return {key for key in os.environ if key.startswith(prefix)}
 
 
 def secret_source(name: str) -> str:
     """``"scope"`` / ``"env"`` / ``""`` for display only — never the value."""
-    try:
-        from agent.secret_scope import current_secret_scope
-
-        scope = current_secret_scope()
-    except Exception:  # noqa: BLE001
-        scope = None
-    if isinstance(scope, Mapping) and str(scope.get(name) or "").strip():
-        return "scope"
-    if (os.environ.get(name) or "").strip():
-        return "env"
-    return ""
+    scope = _active_scope()
+    if scope is not None:
+        return "scope" if str(scope.get(name) or "").strip() else ""
+    return "env" if (os.environ.get(name) or "").strip() else ""
 
 
 def alias_env(alias: str) -> str:
@@ -186,24 +182,24 @@ def platform_extra() -> dict:
     return dict(platform.get("extra") or {})
 
 
-def _device_key(alias: str, spec: Any) -> tuple[str, str]:
-    """Resolve one ``devices`` entry -> ``(key, source)``.
+def _device_key(alias: str, spec: Any) -> tuple[str, bool]:
+    """Resolve one ``devices`` entry -> ``(key, misplaced)``.
 
-    ``source`` is ``"env"`` or ``"inline"``; inline keys live in config.yaml and
-    are reported by ``doctor``/the dashboard as a hygiene warning.
+    Keys are only ever read from a credential — ``BARK_KEY_<ALIAS>`` by default,
+    or the name in an explicit ``key_env``. A literal key typed into
+    ``config.yaml`` (as the entry's value, or under ``key:``) is refused and
+    reported as ``misplaced`` so ``doctor`` and the settings page can tell the
+    operator where it belongs; it is never used.
     """
+    if isinstance(spec, Mapping):
+        env_name = str(spec.get("key_env") or alias_env(alias)).strip()
+        return secret(env_name), bool(str(spec.get("key") or "").strip())
     if isinstance(spec, str) and spec.strip():
         value = spec.strip()
         if re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
-            return secret(value), "env"
-        return value, "inline"  # literal key in YAML
-    if isinstance(spec, Mapping):
-        env_name = str(spec.get("key_env") or alias_env(alias)).strip()
-        key = secret(env_name)
-        if key:
-            return key, "env"
-        return str(spec.get("key") or "").strip(), "inline"
-    return secret(alias_env(alias)), "env"
+            return secret(value), False
+        return secret(alias_env(alias)), True  # literal key in YAML: refused
+    return secret(alias_env(alias)), False
 
 
 def _statuses(value: Any) -> list[str]:
@@ -225,7 +221,7 @@ class Settings:
     notify: dict = field(default_factory=dict)    # hook rules
     allow_private_image_urls: bool = False
     dedupe: bool = False
-    inline_keys: tuple = ()                       # aliases whose key came from YAML
+    misplaced_keys: tuple = ()                    # aliases whose YAML held a literal key (refused)
     values: dict = field(default_factory=dict)    # merged scalar knobs
     provenance: dict = field(default_factory=dict)  # key -> settings|extra|default
 
@@ -262,7 +258,7 @@ class Settings:
             "dedupe": self.dedupe,
             "allow_private_image_urls": self.allow_private_image_urls,
             "notify": dict(self.notify or {}),
-            "inline_keys": list(self.inline_keys),
+            "misplaced_keys": list(self.misplaced_keys),
         }
 
 
@@ -333,24 +329,26 @@ def load_settings(extra: Optional[Mapping[str, Any]] = None) -> Settings:
     server = server.rstrip("/")
 
     devices: dict[str, str] = {}
-    inline: list[str] = []
+    misplaced: list[str] = []
     for alias, spec in (extra.get("devices") or {}).items():
         alias = str(alias).strip()
         if not alias:
             continue
-        key, source = _device_key(alias, spec)
+        key, refused = _device_key(alias, spec)
+        if refused:
+            misplaced.append(alias)
         if key:
             devices[alias] = key
-            if source == "inline":
-                inline.append(alias)
 
-    for alias, key in env_aliases().items():  # env-only aliases, never overwrite explicit extra
+    # ``BARK_TOKEN`` is the single-token setup the docs lead with, so it is read
+    # unconditionally: an extra ``BARK_KEY_<ALIAS>`` must never push it out and
+    # leave the ``default`` device missing.
+    token = secret("BARK_TOKEN")
+    if token:
+        devices.setdefault("default", token)
+
+    for alias, key in env_aliases().items():  # env-only aliases, never overwrite explicit entries
         devices.setdefault(alias, key)
-
-    if not devices:  # single-device mode: the original PR's BARK_TOKEN
-        token = secret("BARK_TOKEN")
-        if token:
-            devices["default"] = token
 
     default_device = str(values.get("default_device") or "").strip()
     if not default_device:
@@ -392,7 +390,7 @@ def load_settings(extra: Optional[Mapping[str, Any]] = None) -> Settings:
         notify=_build_notify(values, provenance, extra),
         allow_private_image_urls=bool(values.get("allow_private_image_urls")),
         dedupe=bool(values.get("dedupe")),
-        inline_keys=tuple(inline),
+        misplaced_keys=tuple(misplaced),
         values=values,
         provenance=provenance,
     )

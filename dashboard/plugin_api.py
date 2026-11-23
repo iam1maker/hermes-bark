@@ -204,8 +204,7 @@ def _env_source(name: str) -> str:
 def _credential_source(settings: Any) -> str:
     """``scope`` / ``env`` for the config card: where the device keys come from."""
     mod = _settings()
-    inline = set(getattr(settings, "inline_keys", ()) or ())
-    names = ["BARK_TOKEN"] + [mod.alias_env(alias) for alias in settings.devices if alias not in inline]
+    names = ["BARK_TOKEN"] + [mod.alias_env(alias) for alias in settings.devices]
     found = {mod.secret_source(name) for name in names}
     if "scope" in found:
         return "scope"
@@ -218,15 +217,20 @@ def _devices(settings: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     extra = _settings().platform_extra()
     declared = extra.get("devices") if isinstance(extra.get("devices"), Mapping) else {}
-    for alias, key in settings.devices.items():
+    misplaced = set(getattr(settings, "misplaced_keys", ()) or ())
+    # A refused literal still owns a row: otherwise the key silently vanishes and
+    # the user has nothing to point at while fixing config.yaml.
+    aliases = list(settings.devices) + sorted(a for a in misplaced if a not in settings.devices)
+    for alias in aliases:
+        key = settings.devices.get(alias, "")
         env_name = _settings().alias_env(alias)
         rows.append({
             "alias": alias,
-            "masked": _mask(key),
+            "masked": _mask(key) if key else "",
             "is_default": alias == settings.default_device,
             "env": env_name,
-            "source": "inline" if alias in settings.inline_keys else "env",
-            "where": "" if alias in settings.inline_keys else _env_source(env_name),
+            "misplaced": alias in misplaced,
+            "where": _env_source(env_name) if key else "",
             "from_extra": alias in declared,
         })
     rows.sort(key=lambda row: (not row["is_default"], row["alias"]))
@@ -241,11 +245,11 @@ def _warnings(settings: Any, ping: Optional[dict[str, Any]] = None) -> list[dict
     if server.startswith("http://") and not re.match(r"^http://(127\.0\.0\.1|localhost|\[::1\])", server):
         out.append({"level": "warn", "text": _t(
             "Server is plain HTTP ({server}): the device key crosses the network in the clear. Only do this on a LAN you control.", server=server)})
-    if settings.inline_keys:
+    if settings.misplaced_keys:
         out.append({"level": "warn", "text": _t(
-            "Plaintext key in config.yaml ({names}): {advice}",
-            names=", ".join(settings.inline_keys),
-            advice=_t("remove devices.<alias>.key and use a BARK_KEY_<ALIAS> env var instead."))})
+            "Plaintext key in config.yaml for {names}: ignored, not sent anywhere.", names=", ".join(settings.misplaced_keys))})
+        out.append({"level": "info", "text": _t(
+            "Move it to BARK_KEY_<ALIAS> (or remove devices.<alias>.key and add the device below).")})
     if ping is not None and not ping.get("ok"):
         out.append({"level": "error", "text": _t(
             "Server unreachable: {error}", error=ping.get("error") or ping.get("status") or "no pong")})

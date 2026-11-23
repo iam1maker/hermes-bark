@@ -240,7 +240,8 @@ async def _push_http(
     timeout: float, attempts: int, client_kwargs: dict, device_key: str,
 ) -> dict:
     """One push attempt sequence with a fixed transport configuration."""
-    last: dict = {"error": "bark push not attempted", "error_kind": "transient", "retryable": False}
+    last: dict = {"error": "bark push not attempted", "error_kind": "transient",
+                  "retryable": False, "never_left": True}
     started = time.monotonic()
 
     def _timing(extra: dict, status: Optional[int] = None) -> dict:
@@ -257,6 +258,7 @@ async def _push_http(
                 last = _timing({
                     "error": redact(f"Bark request failed: {type(exc).__name__}: {exc}", device_key),
                     "error_kind": "transient", "retryable": retryable,
+                    "never_left": retryable,
                 })
                 if attempt + 1 < attempts and retryable:
                     await asyncio.sleep(_backoff(attempt))
@@ -269,6 +271,9 @@ async def _push_http(
                 last = _timing({
                     "error": redact(f"Bark HTTP {status}: {resp.text[:200]}", device_key),
                     "error_kind": kind, "retryable": True,
+                    # The server answered, so the request provably left this host.
+                    # Retryable is not the same claim as never-left.
+                    "never_left": False,
                 }, status)
                 if attempt + 1 < attempts:
                     wait = _retry_after(resp)
@@ -280,13 +285,15 @@ async def _push_http(
                 return _timing({
                     "error": redact(f"Bark HTTP {status}: {resp.text[:200]}", device_key),
                     "error_kind": classify_status(status), "retryable": False,
+                    "never_left": False,
                 }, status)
 
             try:
                 data = resp.json()
             except Exception:  # noqa: BLE001 — a proxy/captive portal answering 200 with HTML
                 return _timing({"error": redact(f"Bark returned non-JSON: {resp.text[:200]}", device_key),
-                                "error_kind": "bad_format", "retryable": False}, status)
+                                "error_kind": "bad_format", "retryable": False,
+                                "never_left": False}, status)
 
             code = data.get("code", 200) if isinstance(data, dict) else 200
             try:
@@ -296,7 +303,7 @@ async def _push_http(
             if code_int != 200:
                 return _timing({"error": redact(f"Bark rejected: {str(data.get('message') or data)[:200]}", device_key),
                                 "error_kind": "bad_format" if 400 <= code_int < 500 else "server",
-                                "retryable": False}, status)
+                                "retryable": False, "never_left": False}, status)
 
             message_id = ""
             if isinstance(data, dict):
@@ -313,7 +320,13 @@ async def push(
     """POST one notification. Returns a result dict, never raises.
 
     ``{"success": True, "message_id": ..., "queued": True}``
-    ``{"error": str, "error_kind": ..., "retryable": bool}``
+    ``{"error": str, "error_kind": ..., "retryable": bool, "never_left": bool}``
+
+    ``never_left`` is the strict provenance claim: True only when the request
+    provably never reached the server (the connection was never obtained). An
+    HTTP status — 429 and 5xx included — means the server answered, so
+    ``never_left`` is False even though ``retryable`` may be True: retryable is
+    our own retry decision, never-left is what core may replay on.
 
     ``proxy`` follows :func:`_proxy_kwargs`. When the environment proxy points at
     this machine and every attempt failed, one direct retry is made: a stale local
@@ -323,10 +336,12 @@ async def push(
     try:
         import httpx
     except ImportError:
-        return {"error": "httpx is not installed", "error_kind": "transient", "retryable": False}
+        return {"error": "httpx is not installed", "error_kind": "transient",
+                "retryable": False, "never_left": True}
 
     if not device_key:
-        return {"error": "no device key resolved", "error_kind": "forbidden", "retryable": False}
+        return {"error": "no device key resolved", "error_kind": "forbidden",
+                "retryable": False, "never_left": True}
 
     url = (server or DEFAULT_SERVER).rstrip("/") + "/push"
     body = {"device_key": device_key, **dict(payload)}

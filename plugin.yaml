@@ -2,7 +2,7 @@ name: hermes-bark
 label: Bark
 kind: platform
 manifest_version: 2
-version: 0.2.0
+version: 0.2.1
 description: >
   Bark iOS push notifications as a Hermes delivery platform (send-only).
   Enables cron `deliver=bark`, `hermes send --to bark[:device]`, the in-session
@@ -15,7 +15,7 @@ description: >
 
 author: 1maker
 license: MIT
-requires_hermes: ">=0.23.0"
+requires_hermes: ">=0.23.2"
 tags: [bark, ios, push, notifications, platform]
 
 # Declared capabilities: `hermes plugins validate` probes register() and fails

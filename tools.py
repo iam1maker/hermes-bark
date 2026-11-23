@@ -11,9 +11,11 @@ import logging
 from typing import Any
 
 try:  # package import
+    from . import events
     from .bark_client import build_payload, dedupe_id, push, validate_image_url
     from .settings import TargetError, load_settings
 except ImportError:  # direct-path import (tests)
+    import events
     from bark_client import build_payload, dedupe_id, push, validate_image_url
     from settings import TargetError, load_settings
 
@@ -94,6 +96,12 @@ async def handle_bark_notify(args: dict[str, Any], **_kw: Any) -> str:
         return json.dumps({"ok": False, "error": str(exc)})
 
     result = await push(settings.server, key, payload, timeout=8.0, attempts=2, proxy=settings.proxy)
+    events.record(
+        source="tool", ok=not result.get("error"), alias=alias,
+        body=str(fields.get("body") or ""), title=str(fields.get("title") or ""),
+        error=str(result.get("error") or ""), status=result.get("status"),
+        latency_ms=result.get("latency_ms"), message_id=str(result.get("message_id") or ""),
+    )
     if result.get("error"):
         return json.dumps({"ok": False, "device": alias, "error": result["error"],
                            "error_kind": result.get("error_kind")})

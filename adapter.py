@@ -147,8 +147,11 @@ class BarkAdapter(BasePlatformAdapter):
             latency_ms=result.get("latency_ms"), message_id=str(result.get("message_id") or ""),
         )
         if result.get("error"):
+            # ``retryable`` on SendResult means "transient connection error — base
+            # retries automatically", so it must carry never-left provenance: a
+            # 429/5xx was answered by the server and must not be replayed.
             return SendResult(success=False, error=result["error"],
-                              error_kind=result.get("error_kind"), retryable=bool(result.get("retryable")))
+                              error_kind=result.get("error_kind"), retryable=bool(result.get("never_left")))
         return SendResult(success=True, message_id=result.get("message_id") or None,
                           raw_response={**result, "device": alias})
 
@@ -203,9 +206,19 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
         return send_error(str(exc), nothing_sent=True)
 
     result = await push(settings.server, key, payload, timeout=10.0, attempts=3, proxy=settings.proxy)
+    events.record(
+        source="standalone", ok=not result.get("error"), alias=alias, body=message,
+        title=str(fields.get("title") or payload.get("title") or ""),
+        error=str(result.get("error") or ""), status=result.get("status"),
+        latency_ms=result.get("latency_ms"), message_id=str(result.get("message_id") or ""),
+    )
     if result.get("error"):
-        return {"error": result["error"], "media_skipped": media_skipped} if media_skipped \
-            else send_error(result["error"], nothing_sent=bool(result.get("retryable")))
+        # Only a request that provably never left may be replayed by cron; a 429
+        # or 5xx was answered by the server and must not become a duplicate push.
+        failure = send_error(result["error"], nothing_sent=bool(result.get("never_left")))
+        if media_skipped:
+            failure["media_skipped"] = media_skipped
+        return failure
     out = {"success": True, "platform": "bark", "chat_id": alias,
            "message_id": result.get("message_id") or "", "queued": True}
     if media_skipped:
