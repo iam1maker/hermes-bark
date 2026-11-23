@@ -1,0 +1,144 @@
+name: hermes-bark
+label: Bark
+kind: platform
+manifest_version: 2
+version: 0.2.0
+description: >
+  Bark iOS push notifications as a Hermes delivery platform (send-only).
+  Enables cron `deliver=bark`, `hermes send --to bark[:device]`, the in-session
+  send_message tool, and optional turn/subagent-end notifications. Supports
+  multi-device aliases, level/sound/group/ttl/url/image, retry with
+  never-left-only semantics, and profile-scoped secret resolution.
+
+  Bark is one-way: there is no inbound stream, no reply channel, and a server
+  200 means "queued to APNs", not "seen on the phone".
+
+author: 1maker
+license: MIT
+requires_hermes: ">=0.23.0"
+tags: [bark, ios, push, notifications, platform]
+
+# Declared capabilities: `hermes plugins validate` probes register() and fails
+# the manifest when the plugin registers more than it declares (catalog rule 6).
+provides_tools:
+  - bark_notify
+provides_hooks:
+  - on_session_end
+  - pre_llm_call
+  - subagent_stop
+
+# Manifest env metadata drives `hermes config` / the dashboard card only.
+# Runtime reads go through settings.secret(): scoped secret → process env →
+# .env files (profile home, $HERMES_HOME, ~/.hermes), which is what makes a key
+# saved in the Dashboard visible to a routed profile.
+requires_env:
+  - name: BARK_TOKEN
+    description: "Default Bark device key (found in the Bark app)"
+    prompt: "Bark device key"
+    password: true
+
+optional_env:
+  - name: BARK_SERVER
+    description: "Bark server URL (default: https://api.day.app; self-hosted is fine)"
+    prompt: "Bark server URL (or empty)"
+    password: false
+  - name: BARK_HOME_CHANNEL
+    description: "Cron/notification target: a device alias or a raw key (default: default device)"
+    prompt: "Bark home target (alias or empty)"
+    password: false
+  - name: BARK_KEY_IPHONE
+    description: "Device key for alias 'iphone' (pattern: BARK_KEY_<ALIAS>)"
+    prompt: "Device key for iphone (or empty)"
+    password: true
+
+# Rendered natively under Settings → Plugins and written by plugins.manage into
+# plugins.entries.hermes-bark.settings (atomic, schema-validated). Devices and
+# keys are NOT here on purpose: a key is a secret and belongs in .env
+# (BARK_KEY_<ALIAS>), never in config.yaml.
+config_schema:
+  server:
+    type: str
+    default: "https://api.day.app"
+    label: Bark 服务器
+    description: "默认 https://api.day.app；自建服务器填自己的地址（明文 http 只建议局域网）"
+  proxy:
+    type: str
+    default: ""
+    label: 代理
+    description: "留空 = 跟随 HTTPS_PROXY 环境变量；direct = 强制直连；也可填 http://127.0.0.1:7897"
+  title:
+    type: str
+    default: "Hermes"
+    label: 默认标题
+    description: "推送卡片顶部标题；cron / 通知都继承它"
+  default_device:
+    type: str
+    default: ""
+    label: 默认设备
+    description: "目标留空时投递到哪个别名；留空 = default（BARK_TOKEN）或第一台已配置设备"
+  level:
+    type: str
+    choices: [active, timeSensitive, critical, passive]
+    default: timeSensitive
+    label: 中断级别
+    description: "timeSensitive 可穿透专注模式；critical 需 App 内授权；passive 静默进通知中心"
+  group:
+    type: str
+    default: "Hermes"
+    label: 通知分组
+    description: "同一分组的推送在通知中心折叠在一起"
+  sound:
+    type: str
+    default: ""
+    label: 提示音
+    description: "Bark 内置铃声名（如 bell、alarm）或留空用系统默认"
+  icon:
+    type: str
+    default: ""
+    label: 图标 URL
+    description: "覆盖通知图标（http(s) 图片地址）"
+  ttl:
+    type: int
+    default: 0
+    label: 有效期（秒）
+    description: "超过有效期不再投递；0 = 不限制"
+  notify_turn_end:
+    type: bool
+    default: false
+    label: 回合结束推送
+    description: "一轮对话结束时推送（默认只推失败/中断，避免每次聊天都响）"
+  notify_turn_end_min_duration_s:
+    type: float
+    default: 90
+    label: 回合最短时长（秒）
+    description: "短于该时长的成功回合不推送；失败/中断不受限"
+  notify_turn_end_statuses:
+    type: str
+    default: "failed,interrupted"
+    label: 回合推送状态
+    description: "逗号分隔：completed / failed / interrupted"
+  notify_subagent_stop:
+    type: bool
+    default: false
+    label: 子代理结束推送
+    description: "delegate_task 的子代理收工后推送摘要"
+  notify_subagent_stop_min_duration_ms:
+    type: float
+    default: 30000
+    label: 子代理最短时长（毫秒）
+    description: "短任务不推送，避免并行子代理刷屏"
+  notify_quiet_hours:
+    type: str
+    default: ""
+    label: 静默时段
+    description: "如 23:30-08:00（可逗号分隔多段）；此时段内所有自动推送跳过"
+  dedupe:
+    type: bool
+    default: true
+    label: 5 秒去重
+    description: "同一会话 5 秒内重复内容只推一次（Bark id 字段）"
+  allow_private_image_urls:
+    type: bool
+    default: false
+    label: 允许私网图片 URL
+    description: "Bark 服务端要能取到图片；开启前确认服务器在可达网络内"
